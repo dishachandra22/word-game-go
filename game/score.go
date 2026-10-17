@@ -1,99 +1,102 @@
-// Package game holds the pure rules of the word game.
-//
-// No database, no HTTP, no Redis. Everything here is a plain function over
-// plain data, which is exactly what makes it worth unit testing.
 package game
 
 import "strings"
 
-// Mark is the colour given to one letter of a guess.
-type Mark string
+type Status string
 
 const (
-	Correct Mark = "correct" // right letter, right position  (green)
-	Present Mark = "present" // right letter, wrong position  (yellow)
-	Absent  Mark = "absent"  // letter not in the answer       (grey)
+	StatusGreen  Status = "GREEN"  // Correct letter in correct position
+	StatusYellow Status = "YELLOW" // Correct letter in wrong position
+	StatusGray   Status = "GRAY"   // Letter not present or excess occurrence
 )
 
-// WordLength is how many letters every word has.
-const WordLength = 5
+type LetterFeedback struct {
+	Letter string `json:"letter"`
+	Status Status `json:"status"`
+}
 
-// MaxGuesses is how many attempts a player gets.
-const MaxGuesses = 6
+type ScoreResult struct {
+	Guess    string           `json:"guess"`
+	Feedback []LetterFeedback `json:"feedback"`
+	Solved   bool             `json:"solved"`
+	Message  string           `json:"message"`
+}
 
-// Score compares a guess against the answer and returns one Mark per letter.
-//
-// The subtle part is duplicate letters. A letter in the answer can only be
-// "claimed" once. If the answer is CRANE and the guess is EERIE, there is
-// exactly one E in the answer, so only ONE of the guess's three E's may be
-// coloured - and greens get first claim.
-//
-// The algorithm is therefore two passes:
-//  1. mark every exact position match, and consume that letter from a count
-//  2. walk the rest, handing out Present only while a letter remains unclaimed
-//
-// Doing it in one pass is the classic bug.
-func Score(guess, answer string) []Mark {
-	guess = strings.ToUpper(guess)
-	answer = strings.ToUpper(answer)
+// Score evaluates a guess against a target word using Wordle duplicate letter rules.
+// Rule: Greens claim letter matches first. Remaining occurrences in target are matched left-to-right for Yellows.
+// Any excess occurrences in guess beyond target letter counts are marked Gray.
+func Score(target, guess string) ScoreResult {
+	targetUpper := strings.ToUpper(strings.TrimSpace(target))
+	guessUpper := strings.ToUpper(strings.TrimSpace(guess))
 
-	marks := make([]Mark, len(guess))
-	remaining := make(map[rune]int)
+	targetRunes := []rune(targetUpper)
+	guessRunes := []rune(guessUpper)
 
-	g := []rune(guess)
-	a := []rune(answer)
+	n := len(guessRunes)
+	feedback := make([]LetterFeedback, n)
 
-	// pass 1 - greens
-	for i := range g {
-		if i < len(a) && g[i] == a[i] {
-			marks[i] = Correct
-		} else if i < len(a) {
-			remaining[a[i]]++
+	if len(targetRunes) != n {
+		for i, r := range guessRunes {
+			feedback[i] = LetterFeedback{
+				Letter: string(r),
+				Status: StatusGray,
+			}
+		}
+		return ScoreResult{
+			Guess:    guessUpper,
+			Feedback: feedback,
+			Solved:   false,
+			Message:  "Word length mismatch",
 		}
 	}
 
-	// pass 2 - yellows, only while that letter is still unclaimed
-	for i := range g {
-		if marks[i] == Correct {
+	targetCounts := make(map[rune]int)
+	greenMatches := make([]bool, n)
+
+	// Pass 1: Mark Green matches and collect count of non-green target letters
+	for i := 0; i < n; i++ {
+		if guessRunes[i] == targetRunes[i] {
+			greenMatches[i] = true
+			feedback[i] = LetterFeedback{
+				Letter: string(guessRunes[i]),
+				Status: StatusGreen,
+			}
+		} else {
+			targetCounts[targetRunes[i]]++
+		}
+	}
+
+	// Pass 2: Mark Yellow for available target letters, or Gray for remaining
+	solved := true
+	for i := 0; i < n; i++ {
+		if greenMatches[i] {
 			continue
 		}
-		if remaining[g[i]] > 0 {
-			marks[i] = Present
-			remaining[g[i]]--
+		solved = false
+		r := guessRunes[i]
+		if count, exists := targetCounts[r]; exists && count > 0 {
+			feedback[i] = LetterFeedback{
+				Letter: string(r),
+				Status: StatusYellow,
+			}
+			targetCounts[r]--
 		} else {
-			marks[i] = Absent
+			feedback[i] = LetterFeedback{
+				Letter: string(r),
+				Status: StatusGray,
+			}
 		}
 	}
 
-	return marks
-}
+	message := "Keep trying! You have attempts remaining."
+	if solved {
+		message = "Splendid! You guessed the daily word!"
+	}
 
-// IsWin reports whether every letter was marked Correct.
-func IsWin(marks []Mark) bool {
-	if len(marks) == 0 {
-		return false
+	return ScoreResult{
+		Guess:    guessUpper,
+		Feedback: feedback,
+		Solved:   solved,
+		Message:  message,
 	}
-	for _, m := range marks {
-		if m != Correct {
-			return false
-		}
-	}
-	return true
-}
-
-// ValidateGuess checks a guess before it is scored.
-func ValidateGuess(guess string, allowed map[string]bool) error {
-	g := strings.ToUpper(strings.TrimSpace(guess))
-	if len(g) != WordLength {
-		return ErrWrongLength
-	}
-	for _, r := range g {
-		if r < 'A' || r > 'Z' {
-			return ErrNotLetters
-		}
-	}
-	if allowed != nil && !allowed[g] {
-		return ErrNotAWord
-	}
-	return nil
 }

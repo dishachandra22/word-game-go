@@ -1,0 +1,9 @@
+.git
+.circleci
+.env*
+k8s/
+README.md
+docker-compose.yml
+Dockerfile
+.dockerignore
+*.log

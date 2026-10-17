@@ -1,0 +1,230 @@
+
+version: 2.1
+
+executors:
+  go-executor:
+    docker:
+      - image: cimg/go:1.22.10
+    working_directory: ~/repo
+
+jobs:
+  secret-scan:
+    executor: go-executor
+    steps:
+      - checkout
+      - run:
+          name: Install and Run Gitleaks Secret Scan
+          command: |
+            set -eo pipefail
+
+            echo "Installing Gitleaks..."
+            curl -fsSL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz \
+              -o /tmp/gitleaks.tar.gz
+            tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+            sudo install /tmp/gitleaks /usr/local/bin/gitleaks
+
+            echo "Running Gitleaks detection..."
+            gitleaks detect --source . --verbose --no-git
+
+  lint:
+    executor: go-executor
+    steps:
+      - checkout
+      - run:
+          name: Run Go Vet and Format Check
+          command: |
+            set -eo pipefail
+            go vet ./...
+            test -z "$(gofmt -l .)"
+
+  unit-tests:
+    executor: go-executor
+    steps:
+      - checkout
+      - run:
+          name: Run Game Score Unit Tests
+          command: |
+            go test -v -cover ./game/...
+
+  integration-tests:
+    docker:
+      - image: cimg/go:1.22.10
+      - image: cimg/postgres:16.0
+        environment:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: wordgame
+      - image: cimg/redis:7.0
+    working_directory: ~/repo
+    steps:
+      - checkout
+      - run:
+          name: Install PostgreSQL Client
+          command: |
+            sudo apt-get update
+            sudo apt-get install -y postgresql-client
+      - run:
+          name: Wait for Postgres and Run Migrations
+          command: |
+            set -eo pipefail
+            echo "Waiting for PostgreSQL..."
+            until PGPASSWORD=postgres psql -h localhost -U postgres -d wordgame -c 'SELECT 1;' >/dev/null 2>&1; do
+              sleep 1
+            done
+
+            echo "Applying SQL migrations..."
+            for f in migrations/*.sql; do
+              [ -f "$f" ] || continue
+              echo "Applying $f..."
+              PGPASSWORD=postgres psql -v ON_ERROR_STOP=1 -h localhost -U postgres -d wordgame -f "$f"
+            done
+      - run:
+          name: Execute Integration Tests
+          environment:
+            DATABASE_URL: "postgres://postgres:postgres@localhost:5432/wordgame?sslmode=disable"
+            REDIS_URL: "redis://localhost:6379"
+          command: |
+            go test -v ./...
+
+  build-and-push-qa:
+    executor: go-executor
+    steps:
+      - checkout
+      - setup_remote_docker:
+          version: default
+      - run:
+          name: Build and Push Docker Image for QA
+          command: |
+            set -eo pipefail
+            REPO="${CIRCLE_PROJECT_REPONAME:-word-game-go}"
+            IMAGE="${DOCKERHUB_USER:-user}/${REPO}"
+            SHORT_SHA=$(echo "${CIRCLE_SHA1}" | cut -c1-7)
+
+            docker build \
+              -t "${IMAGE}:qa" \
+              -t "${IMAGE}:main-${SHORT_SHA}" \
+              -t "${IMAGE}:qa-${SHORT_SHA}" .
+
+            if [ -n "${DOCKERHUB_TOKEN:-}" ] && [ -n "${DOCKERHUB_USER:-}" ]; then
+              echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USER" --password-stdin
+              docker push "${IMAGE}:qa"
+              docker push "${IMAGE}:main-${SHORT_SHA}"
+              docker push "${IMAGE}:qa-${SHORT_SHA}"
+            else
+              echo "WARNING: Docker Hub credentials missing; skipping push."
+            fi
+
+  build-and-push-staging:
+    executor: go-executor
+    steps:
+      - checkout
+      - setup_remote_docker:
+          version: default
+      - run:
+          name: Build and Push Docker Image for Staging
+          command: |
+            set -eo pipefail
+            REPO="${CIRCLE_PROJECT_REPONAME:-word-game-go}"
+            IMAGE="${DOCKERHUB_USER:-user}/${REPO}"
+            SHORT_SHA=$(echo "${CIRCLE_SHA1}" | cut -c1-7)
+
+            docker build \
+              -t "${IMAGE}:stage" \
+              -t "${IMAGE}:staging-${SHORT_SHA}" \
+              -t "${IMAGE}:stage-${SHORT_SHA}" .
+
+            if [ -n "${DOCKERHUB_TOKEN:-}" ] && [ -n "${DOCKERHUB_USER:-}" ]; then
+              echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USER" --password-stdin
+              docker push "${IMAGE}:stage"
+              docker push "${IMAGE}:staging-${SHORT_SHA}"
+              docker push "${IMAGE}:stage-${SHORT_SHA}"
+            else
+              echo "WARNING: Docker Hub credentials missing; skipping push."
+            fi
+
+  build-and-push-prod:
+    executor: go-executor
+    steps:
+      - checkout
+      - setup_remote_docker:
+          version: default
+      - run:
+          name: Build and Push Docker Image for Prod
+          command: |
+            set -eo pipefail
+            REPO="${CIRCLE_PROJECT_REPONAME:-word-game-go}"
+            IMAGE="${DOCKERHUB_USER:-user}/${REPO}"
+            SHORT_SHA=$(echo "${CIRCLE_SHA1}" | cut -c1-7)
+
+            docker build \
+              -t "${IMAGE}:prod" \
+              -t "${IMAGE}:prod-${SHORT_SHA}" .
+
+            if [ -n "${DOCKERHUB_TOKEN:-}" ] && [ -n "${DOCKERHUB_USER:-}" ]; then
+              echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USER" --password-stdin
+              docker push "${IMAGE}:prod"
+              docker push "${IMAGE}:prod-${SHORT_SHA}"
+            else
+              echo "WARNING: Docker Hub credentials missing; skipping push."
+            fi
+
+
+workflows:
+  version: 2
+
+  qa-pipeline:
+    jobs:
+      - secret-scan:
+          filters:
+            branches:
+              only:
+                - main
+                - /feature\/.*/
+
+      - lint:
+          requires:
+            - secret-scan
+          filters:
+            branches:
+              only:
+                - main
+                - /feature\/.*/
+
+      - unit-tests:
+          requires:
+            - lint
+          filters:
+            branches:
+              only:
+                - main
+                - /feature\/.*/
+
+      - integration-tests:
+          requires:
+            - unit-tests
+          filters:
+            branches:
+              only:
+                - main
+                - /feature\/.*/
+
+      - build-and-push-qa:
+          requires:
+            - integration-tests
+          filters:
+            branches:
+              only: main
+
+  staging-pipeline:
+    jobs:
+      - build-and-push-staging:
+          filters:
+            branches:
+              only: staging
+
+  prod-pipeline:
+    jobs:
+      - build-and-push-prod:
+          filters:
+            branches:
+              only: prod

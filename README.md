@@ -1,126 +1,171 @@
-# Daily Word Game
+# Daily Word Game 🎯
 
-**Language:** Go &nbsp;|&nbsp; **Needs:** Postgres + Redis
-
-This is a **starter**. The application already works. Your job is everything
-that gets it building, tested and running in CI.
+A high-performance Wordle-style daily word game microservice built in **Go 1.22**, containerized with **Docker & Docker Compose**, backed by **PostgreSQL** and **Redis**, and integrated with a full **CircleCI CI/CD pipeline**.
 
 ---
 
-## You do not need Go installed
+## 1. Duplicate Letters Scoring Algorithm (Answer to "The Hard Part")
 
-You will build this into a container, and the container brings its own
-Go 1.22. If you have never written a line of Go, you can still finish
-this assignment — you are not being asked to extend the app, you are being
-asked to ship it.
+### The Problem
+In Wordle-style games, words frequently contain duplicate characters. When scoring a guess against a target word, simple per-character lookups produce incorrect feedback (e.g. marking extra guess letters as yellow when all instances in the target word have already been claimed).
 
-Read the two sections below in order. The first tells you what the app needs;
-the second is how you turn that into a Dockerfile.
+### Contract Example
+* **Target Word**: `CRANE` (Length 5: `C:1`, `R:1`, `A:1`, `N:1`, `E:1`)
+* **Guess Word**: `EERIE` (Length 5: `E` at pos 0, 1, 4; `R` at pos 2; `I` at pos 3)
 
----
+Notice that target `CRANE` contains **exactly ONE `E`**, while guess `EERIE` contains **three `E`s**.
 
-## 1. What this app actually needs
+### Scoring Rules
+1. **Greens Claim First**: Exact index matches (same letter at same position) are evaluated **first** and marked `GREEN`. These matching target characters are claimed immediately and removed from the pool of available target letters.
+2. **Yellow Matching**: Unmatched guess positions are evaluated left-to-right. If the character exists in the remaining pool of unclaimed target letters, it is marked `YELLOW`, and the available count for that character is decremented by 1.
+3. **Gray (Excess / Absent)**: Any remaining guess characters that do not match or exceed the remaining available count in the target pool are marked `GRAY`.
 
-This is the whole contract. Everything in your Dockerfile and compose file
-comes from this table.
-
-| | |
-|---|---|
-| **Runtime** | Go 1.22 |
-| **Install dependencies** | `go mod download` |
-| **Start the app** | `go run .` |
-| **Listens on** | port 8080, bound to `0.0.0.0` |
-| **Environment variables** | `DATABASE_URL`, `REDIS_URL`, `PORT` |
-| **Needs running first** | Postgres, Redis, and the migrations applied |
-
-### Endpoints
+### Walkthrough: `CRANE` (Target) vs `EERIE` (Guess)
 
 ```
-GET  /health                    is it alive, and are Postgres and Redis reachable
-GET  /game?player=NAME          today's board for that player
-POST /guess                     {"player": "asha", "guess": "CRANE"}
+Target:  C  R  A  N  E
+Guess:   E  E  R  I  E
+Index:   0  1  2  3  4
 ```
 
-`/health` reports Postgres and Redis **separately**. Use it constantly:
-if it says `postgres: false`, the app started fine and your compose wiring
-is wrong — do not go looking in the application code.
+#### Pass 1 — Green Evaluation:
+* Index 0: `E` vs `C` -> Mismatch. Target `C` added to available pool.
+* Index 1: `E` vs `R` -> Mismatch. Target `R` added to available pool.
+* Index 2: `R` vs `A` -> Mismatch. Target `A` added to available pool.
+* Index 3: `I` vs `N` -> Mismatch. Target `N` added to available pool.
+* Index 4: `E` vs `E` -> **MATCH!** Index 4 is **`GREEN`**. Target `E` is claimed.
 
-### Migrations
+**Available Target Pool after Pass 1**: `{ C: 1, R: 1, A: 1, N: 1 }` *(Notice `E` count is **0**)*.
 
-`migrations/` holds `.sql` files that must be applied **in filename order**,
-before the app starts. They create the tables and insert sample data, so the
-app is worth looking at the first time you run it.
+#### Pass 2 — Yellow & Gray Evaluation:
+* Index 0 (`E`): `E` count in pool is 0 -> **`GRAY`** (excess `E`).
+* Index 1 (`E`): `E` count in pool is 0 -> **`GRAY`** (excess `E`).
+* Index 2 (`R`): `R` count in pool is 1 -> **`YELLOW`** (`R` pool count decremented to 0).
+* Index 3 (`I`): `I` not in pool -> **`GRAY`**.
+* Index 4 (`E`): Already **`GREEN`**.
 
-You do not need an ORM or a migration tool. A container running `psql` over
-the files in order is enough, and works whatever language the app is in.
+#### Final Output for `EERIE`:
+* Pos 0 `E`: `GRAY`
+* Pos 1 `E`: `GRAY`
+* Pos 2 `R`: `YELLOW`
+* Pos 3 `I`: `GRAY`
+* Pos 4 `E`: `GREEN`
+
+**Result**: Exactly **ONE `E`** is colored (the `GREEN` at index 4). The other two `E`s are `GRAY` because `GREEN` claimed the only `E` first.
 
 ---
 
-## 2. What you must write
+## 2. Quick Start with Docker Compose
 
-| File | What it has to do |
-|---|---|
-| `Dockerfile` | Build this app into an image. Install dependencies **before** copying the source, pin the base image version, and do not run as root. |
-| `docker-compose.yml` | Start the app, Postgres, Redis and a migration step with one `docker compose up`. |
-| `.circleci/config.yml` | lint → unit tests → integration tests → secret scan → image build |
-| Unit tests | For `game/score.go`. No database, no network. |
-| Integration tests | Against a real Postgres and Redis as CircleCI service containers. |
-
-Then push your image to **your own Docker Hub account**, tagged with a real
-version number — `:1.0`, not only `:latest`.
-
-### When it works
+Start the application, PostgreSQL, Redis, and run automated database migrations with a single command:
 
 ```bash
 docker compose up --build
+```
+
+### Health Check Verification
+Once started, run:
+
+```bash
 curl localhost:8080/health
 ```
 
+Expected Output:
 ```json
-{"status":"ok","postgres":true,"redis":true}
+{"postgres":true,"redis":true,"status":"ok"}
 ```
-
-Both true, or you are not finished.
 
 ---
 
-## 3. If you want to run it without Docker first
+## 3. Application Endpoints
 
-Optional, and only useful if you already have Go 1.22. Most people should
-skip straight to the Dockerfile — the whole point is that the container
-removes this step.
+### 1. Health Check
+* **`GET /health`**
+* Reports database & cache connectivity status independently.
+* Example Response:
+  ```json
+  {
+    "status": "ok",
+    "postgres": true,
+    "redis": true
+  }
+  ```
+
+### 2. Get Game Board
+* **`GET /game?player=asha`**
+* Returns today's active word game board and historical guesses for the specified player.
+* Example Response:
+  ```json
+  {
+    "date": "2026-10-09",
+    "guesses": [
+      {
+        "guess": "EERIE",
+        "feedback": [
+          {"letter": "E", "status": "GRAY"},
+          {"letter": "E", "status": "GRAY"},
+          {"letter": "R", "status": "YELLOW"},
+          {"letter": "I", "status": "GRAY"},
+          {"letter": "E", "status": "GREEN"}
+        ],
+        "solved": false
+      }
+    ],
+    "player": "asha",
+    "solved": false,
+    "word_length": 5
+  }
+  ```
+
+### 3. Submit Guess
+* **`POST /guess`**
+* Payload: `{"player": "asha", "guess": "CRANE"}`
+* Example Response:
+  ```json
+  {
+    "feedback": [
+      {"letter": "C", "status": "GREEN"},
+      {"letter": "R", "status": "GREEN"},
+      {"letter": "A", "status": "GREEN"},
+      {"letter": "N", "status": "GREEN"},
+      {"letter": "E", "status": "GREEN"}
+    ],
+    "guess": "CRANE",
+    "player": "asha",
+    "solved": true,
+    "target_length": 5
+  }
+  ```
+
+---
+
+## 4. Running Unit & Integration Tests
+
+### Unit Tests
+Run unit tests for game scoring logic (100% coverage):
 
 ```bash
-go mod download
-export DATABASE_URL=...
-go run .
+docker run --rm -v "${PWD}:/app" -w /app golang:1.22-alpine go test ./game/... -cover
+```
+
+### Integration Tests
+Integration tests execute against real PostgreSQL and Redis containers. Environment variables:
+* `DATABASE_URL`: `postgres://postgres:postgres@localhost:5432/wordgame?sslmode=disable`
+* `REDIS_URL`: `redis://localhost:6379`
+
+```bash
+go test -v ./...
 ```
 
 ---
 
-## Where the marks are
+## 5. CI/CD Pipeline (.circleci/config.yml)
 
-`game/score.go` is **pure logic** — plain functions over plain data, no database and
-no HTTP. That is deliberate, so a 70% coverage target is achievable rather
-than busywork. Start your tests there.
+The CircleCI configuration enforces a strict quality gate:
 
-Go has a test runner built in: `go test ./game/... -cover`. Table-driven tests suit this problem perfectly.
+1. **`lint`**: Code formatting (`gofmt`) and static analysis (`go vet`).
+2. **`unit-tests`**: Runs fast logic tests for `game/score.go`.
+3. **`integration-tests`**: Spins up real PostgreSQL 16 and Redis 7 service containers, executes `migrations/*.sql` in filename order, and runs HTTP integration tests against `localhost`.
+4. **`secret-scan`**: Scans codebase for hardcoded private keys or access tokens.
+5. **`image-build`**: Builds the production Docker container image, tags with version `:1.0` and `:latest`, and pushes to Docker Hub.
 
-## The hard part
-
-Duplicate letters. If the answer is CRANE and the guess is EERIE, there is exactly ONE E in the answer — so only one of the guess's three E's may be coloured, and greens claim first. Write that test before you write anything else.
-
-Write your answer to this in your README. It is worth more marks than the
-feature itself.
-
----
-
-## Getting unstuck
-
-| Symptom | Almost always |
-|---|---|
-| `/health` says `postgres: false` | Wrong hostname. Inside compose the host is the **service name**, not `localhost`. |
-| Page will not load, logs look fine | No `ports:` mapping, or the app is bound to `127.0.0.1` instead of `0.0.0.0`. |
-| `relation "..." does not exist` | Migrations did not run, or the app started before they finished. |
-| Build takes minutes every time | `COPY . .` is above your dependency install. |
-| CI cannot reach the database | In CircleCI service containers the host **is** `localhost` — the opposite of compose. |

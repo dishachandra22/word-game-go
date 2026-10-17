@@ -100,3 +100,5 @@ func Score(target, guess string) ScoreResult {
 		Message:  message,
 	}
 }
+
+//demo 3

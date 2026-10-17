@@ -216,7 +216,7 @@ spec:
         - name: dockerhub
       containers:
         - name: daily-word-game
-          image: dishachandra22/word-game-go:qa
+          image: disha220/word-game-go:qa
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
